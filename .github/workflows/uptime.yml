@@ -76,9 +76,11 @@ jobs:
           age_days=$(( ( $(date +%s) - $(date -d "$last" +%s) ) / 86400 ))
           echo "Dernier commit il y a $age_days jour(s)"
           if [ "$age_days" -ge 40 ]; then
-            sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/.keepalive" -q .sha 2>/dev/null || echo "")
-            content=$(date -u +%Y-%m-%dT%H:%M:%SZ | base64)
-            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/.keepalive" -f message="chore: keepalive" -f content="$content" ${sha:+-f sha="$sha"} > /dev/null
+            # En cas d'erreur (fichier absent), gh écrit la réponse d'erreur : on vide alors le sha
+            if ! sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/.keepalive" -q .sha 2>/dev/null); then sha=""; fi
+            args=(-X PUT "repos/$GITHUB_REPOSITORY/contents/.keepalive" -f message="chore: keepalive" -f content="$(date -u +%Y-%m-%dT%H:%M:%SZ | base64)")
+            if [ -n "$sha" ]; then args+=(-f sha="$sha"); fi
+            gh api "${args[@]}" > /dev/null
             echo "Commit keepalive effectué"
           fi
 
