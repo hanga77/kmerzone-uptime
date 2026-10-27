@@ -2,6 +2,7 @@
 # Complète la surveillance du serveur (qui ne peut rien envoyer si le VPS entier est arrêté).
 # Toutes les 5 min (GitHub peut retarder un passage de quelques minutes).
 # - Telegram : une alerte au passage « en ligne → hors ligne », une au retour.
+# - Maintenance annoncée (`ops/kz-watchdog.sh --maintenance` sur le VPS) : ni alerte ni échec.
 # - Email : GitHub envoie un email au propriétaire quand ce workflow échoue (il échoue tant que le site est hors ligne).
 # - Anti-désactivation : GitHub coupe les tâches planifiées après 60 j sans commit ; un commit
 #   automatique de .keepalive est fait si le dernier commit date de plus de 40 j.
@@ -33,6 +34,8 @@ jobs:
           for attempt in 1 2; do
             code=$(curl -s -o body.json -w '%{http_code}' --max-time 20 https://kmerzone.com/api/status || echo 000)
             if [ "$code" = "200" ] && grep -q '"database":"connected"' body.json; then ok=1; break; fi
+            # Maintenance annoncée (page 503 servie par nginx) : ni alerte ni échec
+            if [ "$code" = "503" ] && grep -q '"status":"maintenance"' body.json; then ok=2; echo "Maintenance annoncée"; break; fi
             echo "Essai $attempt : HTTP $code"
             if [ $attempt -lt 2 ]; then sleep 60; fi
           done
@@ -56,7 +59,7 @@ jobs:
         run: |
           curl -s -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             --data-urlencode "chat_id=$CHAT" \
-            --data-urlencode "text=🚨 KmerZone injoignable depuis l'extérieur (HTTP $CODE, contrôle GitHub). Si aucune alerte n'est venue du serveur, le VPS lui-même est peut-être arrêté. (Une maintenance annoncée explique peut-être cette alerte.)"
+            --data-urlencode "text=🚨 KmerZone injoignable depuis l'extérieur (HTTP $CODE, contrôle GitHub). Si aucune alerte n'est venue du serveur, le VPS lui-même est peut-être arrêté."
 
       - name: Alerte « de nouveau en ligne »
         if: steps.probe.outputs.ok == '1' && steps.previous.outputs.conclusion == 'failure'
