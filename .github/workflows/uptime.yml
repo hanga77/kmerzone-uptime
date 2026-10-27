@@ -1,0 +1,88 @@
+# Surveillance externe de kmerzone.com (dépôt public : minutes Actions gratuites).
+# Complète la surveillance du serveur (qui ne peut rien envoyer si le VPS entier est arrêté).
+# Toutes les 5 min (GitHub peut retarder un passage de quelques minutes).
+# - Telegram : une alerte au passage « en ligne → hors ligne », une au retour.
+# - Email : GitHub envoie un email au propriétaire quand ce workflow échoue (il échoue tant que le site est hors ligne).
+# - Anti-désactivation : GitHub coupe les tâches planifiées après 60 j sans commit ; un commit
+#   automatique de .keepalive est fait si le dernier commit date de plus de 40 j.
+# Secrets : TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID. Aucune donnée sensible n'est écrite dans les logs.
+name: Surveillance kmerzone.com
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Vérifier le site (2 essais à 60 s d'intervalle)
+        id: probe
+        run: |
+          ok=0
+          for attempt in 1 2; do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 20 https://kmerzone.com/api/status || echo 000)
+            if [ "$code" = "200" ] && grep -q '"database":"connected"' body.json; then ok=1; break; fi
+            echo "Essai $attempt : HTTP $code"
+            if [ $attempt -lt 2 ]; then sleep 60; fi
+          done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: État du passage précédent
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow uptime.yml --status completed --limit 1 --json conclusion -q '.[0].conclusion' || echo "")
+          echo "conclusion=${prev:-success}" >> "$GITHUB_OUTPUT"
+
+      - name: Alerte « hors ligne »
+        if: steps.probe.outputs.ok == '0' && steps.previous.outputs.conclusion != 'failure'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CODE: ${{ steps.probe.outputs.code }}
+        run: |
+          curl -s -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$CHAT" \
+            --data-urlencode "text=🚨 KmerZone injoignable depuis l'extérieur (HTTP $CODE, contrôle GitHub). Si aucune alerte n'est venue du serveur, le VPS lui-même est peut-être arrêté. (Une maintenance annoncée explique peut-être cette alerte.)"
+
+      - name: Alerte « de nouveau en ligne »
+        if: steps.probe.outputs.ok == '1' && steps.previous.outputs.conclusion == 'failure'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$CHAT" \
+            --data-urlencode "text=✅ KmerZone de nouveau joignable depuis l'extérieur (contrôle GitHub)."
+
+      - name: Anti-désactivation (commit si inactif depuis 40 jours)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh api "repos/$GITHUB_REPOSITORY/commits?per_page=1" -q '.[0].commit.committer.date')
+          age_days=$(( ( $(date +%s) - $(date -d "$last" +%s) ) / 86400 ))
+          echo "Dernier commit il y a $age_days jour(s)"
+          if [ "$age_days" -ge 40 ]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/contents/.keepalive" -q .sha 2>/dev/null || echo "")
+            content=$(date -u +%Y-%m-%dT%H:%M:%SZ | base64)
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/.keepalive" -f message="chore: keepalive" -f content="$content" ${sha:+-f sha="$sha"} > /dev/null
+            echo "Commit keepalive effectué"
+          fi
+
+      # Le passage échoue tant que le site est hors ligne : évite de renvoyer l'alerte et déclenche l'email GitHub
+      - name: Résultat
+        if: steps.probe.outputs.ok == '0'
+        run: exit 1
